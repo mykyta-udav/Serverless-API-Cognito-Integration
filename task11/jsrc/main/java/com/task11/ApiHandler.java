@@ -20,7 +20,10 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.ScanRequest;
+import software.amazon.awssdk.services.dynamodb.model.ScanResponse;
 
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -62,15 +65,8 @@ public class ApiHandler implements RequestHandler<APIGatewayProxyRequestEvent, A
 	private final String userPoolClientId;
 
 	public ApiHandler() {
-		// Initialize AWS SDK clients
-		this.dynamoDbClient = DynamoDbClient.builder()
-				.region(Region.EU_WEST_1)
-				.build();
-		this.cognitoClient = CognitoIdentityProviderClient.builder()
-				.region(Region.EU_WEST_1)
-				.build();
-
-		// Get resource names from environment variables
+		this.dynamoDbClient = DynamoDbClient.builder().region(Region.EU_WEST_1).build();
+		this.cognitoClient = CognitoIdentityProviderClient.builder().region(Region.EU_WEST_1).build();
 		this.tablesTableName = System.getenv("tables_table");
 		this.reservationsTableName = System.getenv("reservations_table");
 		this.userPoolId = System.getenv("booking_userpool_id");
@@ -102,12 +98,68 @@ public class ApiHandler implements RequestHandler<APIGatewayProxyRequestEvent, A
 					if ("POST".equals(httpMethod)) return handlePostReservation(request);
 					break;
 			}
-			return buildResponse(404, "{\"error\":\"Not Found\"}");
+			return buildResponse(400, "{\"error\":\"Invalid request path\"}");
 		} catch (Exception e) {
 			context.getLogger().log("Error: " + e.getMessage());
-			return buildResponse(400, "{\"error\":\"Bad Request\"}");
+			return buildResponse(400, "{\"error\":\"" + e.getMessage() + "\"}");
 		}
 	}
+
+	private APIGatewayProxyResponseEvent handlePostReservation(APIGatewayProxyRequestEvent request) {
+		Map<String, Object> body = gson.fromJson(request.getBody(), Map.class);
+		int tableNumber = ((Double) body.get("tableNumber")).intValue();
+
+		// ======================= VALIDATION 1: Check if table exists =======================
+		ScanRequest tableScanRequest = ScanRequest.builder()
+				.tableName(tablesTableName)
+				.filterExpression("#n = :n")
+				.expressionAttributeNames(Map.of("#n", "number"))
+				.expressionAttributeValues(Map.of(":n", AttributeValue.builder().n(String.valueOf(tableNumber)).build()))
+				.build();
+		if (dynamoDbClient.scan(tableScanRequest).items().isEmpty()) {
+			return buildResponse(400, "{\"error\":\"Table with such number does not exist\"}");
+		}
+
+		// ======================= VALIDATION 2: Check for overlapping reservations =======================
+		String date = (String) body.get("date");
+		LocalTime newStart = LocalTime.parse((String) body.get("slotTimeStart"), DateTimeFormatter.ISO_LOCAL_TIME);
+		LocalTime newEnd = LocalTime.parse((String) body.get("slotTimeEnd"), DateTimeFormatter.ISO_LOCAL_TIME);
+
+		ScanRequest reservationScanRequest = ScanRequest.builder()
+				.tableName(reservationsTableName)
+				.filterExpression("tableNumber = :tn AND #d = :d")
+				.expressionAttributeNames(Map.of("#d", "date"))
+				.expressionAttributeValues(Map.of(
+						":tn", AttributeValue.builder().n(String.valueOf(tableNumber)).build(),
+						":d", AttributeValue.builder().s(date).build()
+				)).build();
+
+		ScanResponse reservationScanResponse = dynamoDbClient.scan(reservationScanRequest);
+		for (Map<String, AttributeValue> item : reservationScanResponse.items()) {
+			LocalTime existingStart = LocalTime.parse(item.get("slotTimeStart").s(), DateTimeFormatter.ISO_LOCAL_TIME);
+			LocalTime existingEnd = LocalTime.parse(item.get("slotTimeEnd").s(), DateTimeFormatter.ISO_LOCAL_TIME);
+			if (newStart.isBefore(existingEnd) && newEnd.isAfter(existingStart)) {
+				return buildResponse(400, "{\"error\":\"Time slot is already booked\"}");
+			}
+		}
+
+		// ======================= If validations pass, create the reservation =======================
+		String reservationId = UUID.randomUUID().toString();
+		Map<String, AttributeValue> reservationItem = new HashMap<>();
+		reservationItem.put("reservationId", AttributeValue.builder().s(reservationId).build());
+		reservationItem.put("tableNumber", AttributeValue.builder().n(String.valueOf(tableNumber)).build());
+		reservationItem.put("clientName", AttributeValue.builder().s((String) body.get("clientName")).build());
+		reservationItem.put("phoneNumber", AttributeValue.builder().s((String) body.get("phoneNumber")).build());
+		reservationItem.put("date", AttributeValue.builder().s(date).build());
+		reservationItem.put("slotTimeStart", AttributeValue.builder().s((String) body.get("slotTimeStart")).build());
+		reservationItem.put("slotTimeEnd", AttributeValue.builder().s((String) body.get("slotTimeEnd")).build());
+
+		dynamoDbClient.putItem(PutItemRequest.builder().tableName(reservationsTableName).item(reservationItem).build());
+
+		return buildResponse(200, gson.toJson(Map.of("reservationId", reservationId)));
+	}
+
+	// ... all other methods from the previous version remain the same ...
 
 	private APIGatewayProxyResponseEvent handleSignUp(APIGatewayProxyRequestEvent request) {
 		Map<String, String> body = gson.fromJson(request.getBody(), Map.class);
@@ -202,24 +254,6 @@ public class ApiHandler implements RequestHandler<APIGatewayProxyRequestEvent, A
 		return buildResponse(200, gson.toJson(Map.of("reservations", reservations)));
 	}
 
-	private APIGatewayProxyResponseEvent handlePostReservation(APIGatewayProxyRequestEvent request) {
-		Map<String, Object> body = gson.fromJson(request.getBody(), Map.class);
-
-		String reservationId = UUID.randomUUID().toString();
-		Map<String, AttributeValue> item = new HashMap<>();
-		item.put("reservationId", AttributeValue.builder().s(reservationId).build());
-		item.put("tableNumber", AttributeValue.builder().n(String.valueOf(((Double)body.get("tableNumber")).intValue())).build());
-		item.put("clientName", AttributeValue.builder().s(body.get("clientName").toString()).build());
-		item.put("phoneNumber", AttributeValue.builder().s(body.get("phoneNumber").toString()).build());
-		item.put("date", AttributeValue.builder().s(body.get("date").toString()).build());
-		item.put("slotTimeStart", AttributeValue.builder().s(body.get("slotTimeStart").toString()).build());
-		item.put("slotTimeEnd", AttributeValue.builder().s(body.get("slotTimeEnd").toString()).build());
-
-		dynamoDbClient.putItem(PutItemRequest.builder().tableName(reservationsTableName).item(item).build());
-		return buildResponse(200, gson.toJson(Map.of("reservationId", reservationId)));
-	}
-
-	// Helper Methods
 	private Map<String, Object> convertDynamoDbItemToTableMap(Map<String, AttributeValue> item) {
 		Map<String, Object> table = new HashMap<>();
 		table.put("id", Integer.parseInt(item.get("id").n()));
