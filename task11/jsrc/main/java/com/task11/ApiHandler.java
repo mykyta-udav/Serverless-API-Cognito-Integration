@@ -109,7 +109,6 @@ public class ApiHandler implements RequestHandler<APIGatewayProxyRequestEvent, A
 		Map<String, Object> body = gson.fromJson(request.getBody(), Map.class);
 		int tableNumber = ((Double) body.get("tableNumber")).intValue();
 
-		// ======================= VALIDATION 1: Check if table exists =======================
 		ScanRequest tableScanRequest = ScanRequest.builder()
 				.tableName(tablesTableName)
 				.filterExpression("#n = :n")
@@ -120,7 +119,6 @@ public class ApiHandler implements RequestHandler<APIGatewayProxyRequestEvent, A
 			return buildResponse(400, "{\"error\":\"Table with such number does not exist\"}");
 		}
 
-		// ======================= VALIDATION 2: Check for overlapping reservations =======================
 		String date = (String) body.get("date");
 		LocalTime newStart = LocalTime.parse((String) body.get("slotTimeStart"), DateTimeFormatter.ISO_LOCAL_TIME);
 		LocalTime newEnd = LocalTime.parse((String) body.get("slotTimeEnd"), DateTimeFormatter.ISO_LOCAL_TIME);
@@ -143,10 +141,10 @@ public class ApiHandler implements RequestHandler<APIGatewayProxyRequestEvent, A
 			}
 		}
 
-		// ======================= If validations pass, create the reservation =======================
-		String reservationId = UUID.randomUUID().toString();
+		String newReservationId = UUID.randomUUID().toString();
 		Map<String, AttributeValue> reservationItem = new HashMap<>();
-		reservationItem.put("reservationId", AttributeValue.builder().s(reservationId).build());
+
+		reservationItem.put("id", AttributeValue.builder().s(newReservationId).build());
 		reservationItem.put("tableNumber", AttributeValue.builder().n(String.valueOf(tableNumber)).build());
 		reservationItem.put("clientName", AttributeValue.builder().s((String) body.get("clientName")).build());
 		reservationItem.put("phoneNumber", AttributeValue.builder().s((String) body.get("phoneNumber")).build());
@@ -156,10 +154,8 @@ public class ApiHandler implements RequestHandler<APIGatewayProxyRequestEvent, A
 
 		dynamoDbClient.putItem(PutItemRequest.builder().tableName(reservationsTableName).item(reservationItem).build());
 
-		return buildResponse(200, gson.toJson(Map.of("reservationId", reservationId)));
+		return buildResponse(200, gson.toJson(Map.of("reservationId", newReservationId)));
 	}
-
-	// ... all other methods from the previous version remain the same ...
 
 	private APIGatewayProxyResponseEvent handleSignUp(APIGatewayProxyRequestEvent request) {
 		Map<String, String> body = gson.fromJson(request.getBody(), Map.class);
